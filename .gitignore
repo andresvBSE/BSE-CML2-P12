@@ -1,5 +1,6 @@
 data
 .DS_Store
+get-pip.py
 
 # Jupyter Notebook
 .ipynb_checkpoints
