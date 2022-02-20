@@ -1,82 +1,47 @@
-import pandas as pd
-import numpy as np
-from sklearn import base
-from sklearn.model_selection import KFold, StratifiedKFold
+def add_noise(series, noise_level):
+    return series * (1 + noise_level * np.random.randn(len(series)))
 
-class KFoldTargetEncoderTrain1(base.BaseEstimator, base.TransformerMixin):
-
-    def __init__(self, colnames,targetName,n_fold=5,verbosity=True,discardOriginal_col=False):
-
-        self.colnames = colnames
-        self.targetName = targetName
-        self.n_fold = n_fold
-        self.verbosity = verbosity
-        self.discardOriginal_col = discardOriginal_col
-
-    def fit(self, X, y=None):
-        return self
-
-
-    def transform(self,X):
-
-        assert(type(self.targetName) == str)
-        assert(type(self.colnames) == str)
-        assert(self.colnames in X.columns)
-        assert(self.targetName in X.columns)
-
-        mean_of_target = X[self.targetName].mean()
-        #kf = KFold(n_splits = self.n_fold, shuffle = False)
-        kf = StratifiedKFold(n_splits = self.n_fold, shuffle = False)
-
-
-        col_mean_name = self.colnames + '_' + 'Kfold_Target_Enc'
-        X[col_mean_name] = np.nan
-
-        #for tr_ind, val_ind in kf.split(X):
-        for tr_ind, val_ind in kf.split(X, X[self.targetName]):
-            X_tr, X_val = X.iloc[tr_ind], X.iloc[val_ind]
-#             print(tr_ind,val_ind)
-            X.loc[X.index[val_ind], col_mean_name] = X_val[self.colnames].map(X_tr.groupby(self.colnames)[self.targetName].mean())
-
-        X[col_mean_name].fillna(mean_of_target, inplace = True)
-
-        if self.verbosity:
-
-            encoded_feature = X[col_mean_name].values
-            print('Correlation between the new feature, {} and, {} is {}.'.format(col_mean_name,
-                                                                                      self.targetName,
-                                                                                      np.corrcoef(X[self.targetName].values, encoded_feature)[0][1]))
-        if self.discardOriginal_col:
-            X = X.drop(self.targetName, axis=1)
-            
-
-        return X
-
-
-class KFoldTargetEncoderTest(base.BaseEstimator, base.TransformerMixin):
-    
-    def __init__(self,train,colNames,encodedName):
-        
-        self.train = train
-        self.colNames = colNames
-        self.encodedName = encodedName
-        
-        
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self,X):
-
-
-        mean = self.train[[self.colNames,self.encodedName]].groupby(self.colNames).mean().reset_index() 
-        
-        dd = {}
-        for index, row in mean.iterrows():
-            dd[row[self.colNames]] = row[self.encodedName]
-
-        
-        X[self.encodedName] = X[self.colNames]
-        X = X.replace({self.encodedName: dd})
-
-        return X
+def target_encode(trn_series=None, 
+                  tst_series=None, 
+                  target=None, 
+                  min_samples_leaf=1, 
+                  smoothing=1,
+                  noise_level=0):
+    """
+    Smoothing is computed like in the following paper by Daniele Micci-Barreca
+    https://kaggle2.blob.core.windows.net/forum-message-attachments/225952/7441/high%20cardinality%20categoricals.pdf
+    trn_series : training categorical feature as a pd.Series
+    tst_series : test categorical feature as a pd.Series
+    target : target data as a pd.Series
+    min_samples_leaf (int) : minimum samples to take category average into account
+    smoothing (int) : smoothing effect to balance categorical average vs prior  
+    """ 
+    assert len(trn_series) == len(target)
+    assert trn_series.name == tst_series.name
+    temp = pd.concat([trn_series, target], axis=1)
+    # Compute target mean 
+    averages = temp.groupby(by=trn_series.name)[target.name].agg(["mean", "count"])
+    # Compute smoothing
+    smoothing = 1 / (1 + np.exp(-(averages["count"] - min_samples_leaf) / smoothing))
+    # Apply average function to all target data
+    prior = target.mean()
+    # The bigger the count the less full_avg is taken into account
+    averages[target.name] = prior * (1 - smoothing) + averages["mean"] * smoothing
+    averages.drop(["mean", "count"], axis=1, inplace=True)
+    # Apply averages to trn and tst series
+    ft_trn_series = pd.merge(
+        trn_series.to_frame(trn_series.name),
+        averages.reset_index().rename(columns={'index': target.name, target.name: 'average'}),
+        on=trn_series.name,
+        how='left')['average'].rename(trn_series.name + '_mean').fillna(prior)
+    # pd.merge does not keep the index so restore it
+    ft_trn_series.index = trn_series.index 
+    ft_tst_series = pd.merge(
+        tst_series.to_frame(tst_series.name),
+        averages.reset_index().rename(columns={'index': target.name, target.name: 'average'}),
+        on=tst_series.name,
+        how='left')['average'].rename(trn_series.name + '_mean').fillna(prior)
+    # pd.merge does not keep the index so restore it
+    ft_tst_series.index = tst_series.index
+    return add_noise(ft_trn_series, noise_level), add_noise(ft_tst_series, noise_level)
         
